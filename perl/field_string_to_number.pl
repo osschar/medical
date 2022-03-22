@@ -1,10 +1,25 @@
 #!/usr/bin/perl -w
 
+# Add script location to @INC
+BEGIN
+{
+  $0 =~ m!(.+)/[^/]+!;
+  unshift @INC, $1;
+}
+
+use ArgParse;
+use Datus;
+use Date;
+
 use open qw(:std :utf8);
 use File::Copy;
 use Text::CSV_PP;
 
 my $parser = Text::CSV_PP->new({binary => 1});
+
+# Field used to identify / index between files.
+# Relevant when $sidx is defined.
+$INDEX_FIELD = 0;
 
 # Print header
 $no_header = 0;
@@ -27,40 +42,18 @@ $COLLAPSE_SEP  = ":";
 $COLLAPSE_SORT = 0;
 $COLLAPSE_UNIQ = 0; # Remove multiple identical entries
 
+$argparse_quiet = 0;
+
 # Custom mapping function
 undef $midx;
 
-if ($#ARGV < 0)
-{
-  print STDERR<<"FNORD";
-Usage: $0 show|test|do [fidx=n] [cidx=n] [midx=n] [sidx=n] '{<closure>}' csv-files-to-process
- Action selection:
-  show    - run through all events and print some info
-  debug   - run over first 100 entries and, probably, print some more info
-  do      - run, process and replace the input CSV with modified lines
- Args:
-  fidx    - field index to convert from string to integer
-  cidx    - collapse index -- entries from several lines will be merged
-  midx    - map index -- map values using custom functions / regexps
-  sidx    - sort index -- sort entries within same patient-id (element 0) on this field
-FNORD
-  exit 1;
-}
-
-@act_av = qw( show test do );
-
-$act = shift @ARGV;
-
-die "action (first arg) must be '" . join("' or '", @act_av) . "'"
-    unless grep { $act eq $_ } @act_av;
-
-print "\n", join(" ", "- Running:", $0, $act, @ARGV), "\n" unless $no_header;
+# Sort records withing a patient-uid on this field
+undef $sidx;
 
 
 ################################################################################
 #
 # sub setup_for_comorb_mapping
-#
 #
 
 sub setup_for_comorb_mapping
@@ -146,6 +139,7 @@ sub setup_for_hosp_collapse
 
 %known = ();
 @known = ();
+%aliases = (); # to hold array-refs
 
 sub add_known
 {
@@ -159,25 +153,75 @@ sub add_known
   }
 }
 
-while (1)
+sub alias_known
 {
-  if ($ARGV[0] =~ m/^(\w+)=(-?\d+)$/)
+  my $orig_key = shift;
+  die "unknown primary key $orig_key" unless exists $known{$orig_key};
+  my $orig_val = $known{$orig_key};
+  my $key;
+  while (defined($key = shift))
   {
-    print STDERR "eval \$$1=$2\n" unless $quiet;
-    eval "\$$1=$2";
-    shift @ARGV;
-  }
-  elsif ($ARGV[0] =~ m/^\{.*\}$/)
-  {
-    print STDERR "eval $ARGV[0]\n" unless $quiet;
-    eval $ARGV[0];
-    shift @ARGV;
-  }
-  else
-  {
-    last;
+    $known{$key} = $orig_val;
+    push @{$aliases{$orig_key}}, $key;
+    print STDERR "New alias for index $orig_val / '$orig_key': '$key'\n" unless $quiet;
   }
 }
+
+sub read_known
+{
+  my $fname = shift;
+  my $known_aref = do "./$fname";
+  die "parse of $fname failed" unless ref($known_aref) eq 'ARRAY';
+  for my $ar (@$known_aref) {
+    my $val = shift @$ar;
+    my $key = shift @$ar;
+
+    die "internal inconsistency in $fname, at value=$val" unless $val == scalar @known;
+
+    $known{$key} = $val;
+    push @known, $key;
+    my $akey;
+    while (defined($akey = shift @$ar))
+    {
+      $known{$akey} = $val;
+      push @{$aliases{$key}}, $akey;
+    }
+  }
+}
+
+################################################################################
+
+if ($#ARGV < 0)
+{
+  print STDERR<<"FNORD";
+Usage: $0 [<filename.cfg>] [fidx=n] [cidx=n] [midx=n] [sidx=n] '{<closure>}' show|sort|test|do csv-files-to-process
+ Action selection:
+  show    - run through all events and print some info
+  sort    - like show but sort fidx values and print in format for add_known_from_file()
+  debug   - run over first 100 entries and, probably, print some more info
+  do      - run, process and replace the input CSV with modified lines
+ Args:
+  fidx    - field index to convert from string to integer
+  cidx    - collapse index -- entries from several lines will be merged
+  midx    - map index -- map values using custom functions / regexps
+  sidx    - sort index -- sort entries within same patient-id (element 0) on this field
+FNORD
+  exit 1;
+}
+
+# Parse config-file, assign and closure arguments, if any: var=val or '{<closure>}'
+ArgParse($argparse_quiet);
+
+print "\n", join(" ", "- Running:", $0, @ARGV), "\n" unless $no_header;
+
+@act_av = qw( show sort test do );
+
+$act = shift @ARGV;
+
+die "action argument must be '" . join("' or '", @act_av) . "'"
+    unless grep { $act eq $_ } @act_av;
+
+################################################################################
 
 if (not defined $fidx and not defined $cidx and not defined $midx)
 {
@@ -311,10 +355,28 @@ for my $fname (@ARGV)
 
   if (defined $fidx)
   {
-    my $K = @known;
-    for (my $i = 0; $i < $K; ++$i)
+    if ($act eq 'sort')
     {
-      printf "  %2d  %s\n", $i, $known[$i];
+      @known = sort @known;
+      my $K = @known;
+      print "[\n";
+      for (my $i = 0; $i < $K; ++$i)
+      {
+        print "[ ", $i, ", ", join(", ", map { "'$_'"} $known[$i], @{$aliases{$known[$i]}}), " ],\n"
+      }
+      print "];\n";
+    }
+    else
+    {
+      my $K = @known;
+      for (my $i = 0; $i < $K; ++$i)
+      {
+        printf "  %2d  '%s'", $i, $known[$i];
+        if (defined $aliases{$known[$i]}) {
+          print " - aliases: ", join(" ", map { "'$_'"} @{$aliases{$known[$i]}});
+        }
+        printf("\n");
+      }
     }
   }
 
@@ -322,7 +384,7 @@ for my $fname (@ARGV)
   {
     if (defined $sidx)
     {
-      @lines = sort { $a->[0] <=> $b->[0] || $a->[$sidx] <=> $b->[$sidx] } @lines;
+      @lines = sort { $a->[$INDEX_FIELD] <=> $b->[$INDEX_FIELD] || $a->[$sidx] <=> $b->[$sidx] } @lines;
     }
 
     open L, ">$fname";

@@ -3,16 +3,18 @@
 
 #include "TFile.h"
 #include "TTree.h"
-
 #include "TPRegexp.h"
-
 class TH1;
 
 #include <functional>
 #include <vector>
 
-#include "structs.h"
+//==============================================================================
 
+using seq_id_t = long long;
+
+#include "../structs.h"
+#include "../rt_defines.h"
 
 //==============================================================================
 // RtFileBase
@@ -23,18 +25,20 @@ class RtFileBase
 public:
   virtual void attach_or_create(TTree *tree, bool attach) = 0;
 
-  virtual void set_current_to_first_or_default() = 0;
+  virtual const TString& name() const = 0;
+  virtual bool rt_present() const = 0;
+  virtual int  rt_size() const = 0;
+
   virtual void reset_selected_index() = 0;
   virtual void set_selected_index(int idx) = 0;
   virtual void apply_selected_index() = 0;
 
-
   virtual ~RtFileBase() {}
 
-  virtual int InitReadFromMainBranch() = 0;
-  virtual int FillMainBranch() = 0;
+  virtual seq_id_t InitReadFromMainBranch() = 0;
+  virtual seq_id_t FillMainBranch() = 0;
 
-  virtual int FillBranch(int) = 0;
+  virtual int FillBranch(seq_id_t) = 0;
 };
 
 
@@ -46,11 +50,13 @@ template <typename TT>
 class RtFile : public RtFileBase
 {
   FILE       *m_fp = 0;
-  TBranch    *m_branch;
-  TBranch    *m_present;
+  TBranch    *m_branch = nullptr;
+  TBranch    *m_present = nullptr;
   
 public: 
-  std::vector<TT> *m_rt_vec;
+  typedef TT item_type;
+
+  std::vector<TT> *m_rt_vec = nullptr;
   TT               m_rt_cur;
   bool             m_rt_present;
 
@@ -59,8 +65,8 @@ public:
   TString     m_name;
   TString     m_header;
 
-  int         m_cur_seqid = 0;
-  int         m_selected_index = -1; // index of vectorentry to be copied into m_rt_cur
+  seq_id_t    m_cur_seqid = 0;
+  int         m_selected_index = -1; // index of vector entry to be copied into m_rt_cur
 
   void next_line()
   {
@@ -68,17 +74,16 @@ public:
     m_cur_seqid = m_rt_cur.ReadLine(m_fp, m_split_re);
   }
 
-  void set_current_to_first_or_default() override
-  {
-    if (m_rt_present)
-      m_rt_cur = (*m_rt_vec)[0];
-    else
-      m_rt_cur = TT();
-  }
+  //----------------------------------------------------------------------------
 
-  void reset_selected_index()      override { m_selected_index = -1;  }
+  const TString& name() const override { return m_name; }
+  bool rt_present() const override { return m_rt_present; }
+  int  rt_size()    const override { return m_rt_vec->size(); }
+
+  void reset_selected_index() override { m_selected_index = -1;  }
   void set_selected_index(int idx) override { m_selected_index = idx; }
-  void apply_selected_index()      override
+
+  void apply_selected_index() override
   {
     if (m_selected_index < 0)
       m_rt_cur = TT();
@@ -122,7 +127,7 @@ public:
       m_present = tree->Branch(name_present, &m_rt_present);
 
       TString fname;
-      fname.Form("RT_FILES/%s.rtt", m_name.Data());
+      fname.Form("RTT_FILES/%s.rtt", m_name.Data());
       m_fp = fopen(fname.Data(), "r");
       if (! m_fp)
       {
@@ -139,28 +144,29 @@ public:
     fclose(m_fp);
   }
 
-  int InitReadFromMainBranch() override
+  seq_id_t InitReadFromMainBranch() override
   {
     // Read first entry from RTT file to bootstrap seqid handling.
 
-    if (m_cur_seqid != 0) throw std::runtime_error("InitReadFromMainBranch() can only be called at the beginning.");
+    if (m_cur_seqid != seq_id_t(0))
+      throw std::runtime_error("InitReadFromMainBranch() can only be called at the beginning.");
 
     next_line();
 
     return m_cur_seqid;
   }
 
-  int FillMainBranch() override
+  seq_id_t FillMainBranch() override
   {
     // Read all entries for current seqid from RTT file.
     // Note that we have to over-read for one entry to detect seqid change.
 
-    if (m_cur_seqid == -1) return -1;
+    if (m_cur_seqid == seq_id_t(-1)) return seq_id_t(-1);
 
     m_rt_vec->clear();
     m_rt_present = false;
 
-    int this_seqid = m_cur_seqid;
+    seq_id_t this_seqid = m_cur_seqid;
 
     do
     {
@@ -174,13 +180,13 @@ public:
     return this_seqid;
   }
 
-  int FillBranch(int seqid) override
+  int FillBranch(seq_id_t seqid) override
   {
     m_rt_vec->clear();
     m_rt_present = false;
 
     int ret = -1;
-    if (m_cur_seqid >= 0)
+    if (m_cur_seqid >= seq_id_t(0))
     {
       ret = 0;
 
@@ -307,7 +313,7 @@ public:
   TFile     *m_file = 0;
   TTree     *m_tree = 0;
 
-  int                      m_seqid = -1;
+  seq_id_t                 m_seqid = seq_id_t(-1);
   std::vector<RtFileBase*> m_rt_files;
 
   void attach_or_create(bool attach);
@@ -316,6 +322,8 @@ public:
 
   RtSetBase();
   ~RtSetBase();
+
+  int num_files() const { return m_rt_files.size(); }
 };
 
 //==============================================================================
@@ -333,11 +341,11 @@ public:
 
 //==============================================================================
 
-#define DECL(_cls_, _id_, _name_)                                       \
+#define DECL(_cls_, _id_, _name_) \
   RtFile<_cls_>&      _name_ ## _r = *((RtFile<_cls_>*)m_rt_files[_id_]); \
   std::vector<_cls_>& _name_ ## _v = * _name_ ## _r.m_rt_vec; \
   bool&               _name_ ## _p =   _name_ ## _r.m_rt_present;  \
-  _cls_&              _name_       =   _name_ ## _r.m_rt_cur;
+  _cls_&              _name_       =   _name_ ## _r.m_rt_cur
 
 
 class RtSet : public RtSetBase
@@ -351,6 +359,8 @@ protected:
                                  int pos, const IndexEventRange& res,
                                  IndexEventRange_v& results);
 
+  int select_and_apply_first_entry_for_all_files();
+
   // ----------------------------------------------------------------
 
   AccessList_t        m_prim_acc_list;
@@ -362,31 +372,17 @@ protected:
   std::vector<TH1*>   hv_sec_delta_histos;
 
   // ----------------------------------------------------------------
-  // Shorthands for data variables
-
-  DECL(Demo, 0, demo);
-  DECL(BNP, 1, bnp);
-  DECL(CBC, 2, cbc);               //*
-  DECL(CMP, 3, cmp);               //*
-  DECL(Device, 4, device);         //-
-  DECL(ECG, 5, ecg);               //*
-  DECL(Hospitalization, 6, hosp);  //-
-  DECL(INR, 7, inr);
-  DECL(Lactate, 8, lactate);
-  DECL(Magnesium, 9, magnesium);
-  DECL(Medical_hx, 10, med_hx);    //-
-  DECL(TSH, 11, tsh);
-  DECL(Vitals, 12, vital);
-  DECL(Echo, 13, echo);
+  // Shorthands for table variables
+  RT_SET_SHORTHANDS_DECL;
 
 public:
 
-  RtSet(const char* fname="Epic.root");
+  RtSet(const char* fname);
 
   void SetupIndexRangeHistos(int max_range_for_index);
 
   int  GetTreeEntry(Long64_t entry, int max_range_for_index);
-  int  GetTreeEntryDemo30Hack(Long64_t entry);
+  // int  GetTreeEntryDemo30Hack(Long64_t entry);
 
   void print_acc_list(AccessList_t& accl);
 

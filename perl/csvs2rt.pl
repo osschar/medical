@@ -1,8 +1,13 @@
 #!/usr/bin/perl -w
 
-use lib ".";
-use lib "../epic";
+# Add script location to @INC
+BEGIN
+{
+  $0 =~ m!(.+)/[^/]+!;
+  unshift @INC, $1;
+}
 
+use ArgParse;
 use Datus;
 use Date;
 $Date::ref_date = new Date (2000, 1, 1);
@@ -33,7 +38,7 @@ $FNAME_POST = '';
 die "Filename does not match expected pattern"
     unless defined $FID;
 
-$oname = "RT_FILES/${FID}.rtt";
+$oname = "RTT_FILES/${FID}.rtt";
 
 # Field used to identify / index between files
 $INDEX_FIELD = 0;
@@ -79,11 +84,13 @@ $FLATTEN_KEEP_UNIT   =  0; # When set reference_unit field is stored for each en
 $FLATTEN_CHECK_UNIT  =  1; # When set it is checked that every entry for some name uses the same unit
 
 $print_var_index = 0;
+$print_seqids    = 0; # program exits after this
 $print_fields    = 0;
-$print_seqids    = 0;
 $print_struct    = 1;
 $make_rtt_file   = 1;
 $make_root_tree  = 0;
+
+$argparse_quiet = 0;
 
 ################################################################################
 
@@ -97,31 +104,14 @@ $LMNC = "(?:${less_more_re})?\\s*"; # less-more-not-capture
 $INTC = "([-+]?\\d+)";
 $FLTC = "([-+]?(?:\\d*\\.\\d*(?:[eE][-+]?\\d+)?)|\\d+[eE][-+]?\\d+)";
 
-$undef_re = "(?:invalid|inval|duplicate|null|pending)";
+$undef_re = "(?:invalid|inval|duplicate|null|pending|NA)";
 
 ################################################################################
 
-# Parse assign and closure arguments, if any: var=val or '{<closure>}'
+print STDERR "\n", join(" ", "- Running:", $0, @ARGV), "\n";
 
-while (1)
-{
-  if ($ARGV[0] =~ m/^(\w+)=(-?\d+)$/)
-  {
-    print STDERR "eval \$$1=$2\n" unless $quiet;
-    eval "\$$1=$2";
-    shift @ARGV;
-  }
-  elsif ($ARGV[0] =~ m/^\{.*\}$/)
-  {
-    print STDERR "eval $ARGV[0]\n" unless $quiet;
-    eval $ARGV[0];
-    shift @ARGV;
-  }
-  else
-  {
-    last;
-  }
-}
+# Parse config-file, assign and closure arguments, if any: var=val or '{<closure>}'
+ArgParse($argparse_quiet);
 
 ################################################################################
 
@@ -294,9 +284,9 @@ my $needs_sort = 0;
 
 for (my $i = 0; $i < $#index; ++$i)
 {
-  if ($index[$i][0] > $index[$i + 1][0])
+  if ($index[$i]->[0] > $index[$i + 1]->[0])
   {
-    $needs_sort = "at line $i index is $index[$i][0], on next line it is " . $index[$i + 1][0];
+    $needs_sort = "at line $i index is $index[$i]->[0], on next line it is " . $index[$i + 1]->[0];
     last;
   }
 }
@@ -325,12 +315,12 @@ $max_entries_per_id = 0;
 $cur_entries_per_id = 0;
 
 {
-  my $prev_seqnum = $index[0]->[$INDEX_FIELD];
+  my $prev_seqnum = $index[0]->[0];
   $cur_entries_per_id = 1;
 
   for (my $i = 1; $i < $n_index; ++$i)
   {
-    my $seqnum = $index[$i]->[$INDEX_FIELD];
+    my $seqnum = $index[$i]->[0];
 
     if ($seqnum == $prev_seqnum)
     {
@@ -357,7 +347,7 @@ if ($print_seqids)
 {
   for (my $i = 0; $i < $n_index; ++$i)
   {
-    print $index[$i]->[$INDEX_FIELD], "\n";
+    print $index[$i]->[0], "\n";
   }
   print STDERR "Exiting after printing sequids, entries_clones=$entries_clones, entries_sparse=$entries_sparse.\n";
   exit 0;
@@ -734,14 +724,13 @@ if ($print_struct)
   {
     printf "  %-15s %s = %s;%s\n", $ctyp[$i], $f[$i], $dflt[$i], defined $ccom[$i] ? " // $ccom[$i]" : "";
   }
-
   print "\n";
 
   print <<'END';
-  int ReadLine(FILE *fp, TPMERegexp &splitter)
+  seq_id_t ReadLine(FILE *fp, TPMERegexp &splitter)
   {
     TString l;
-    if ( ! l.Gets(fp)) return -1;
+    if ( ! l.Gets(fp)) return seq_id_t(-1);
     splitter.Split(l);
 END
   for (my $i = $FIRST_DATA_FIELD; $i < $num_fields; ++$i)
@@ -760,8 +749,10 @@ END
       print "    $f[$i] = splitter[$i].${foo}();\n";
     }
   }
-  print "    return splitter[$INDEX_FIELD].Atoi();\n";
+  print "    return splitter[$INDEX_FIELD].Atoll();\n";
   print "  }\n";
+
+  if (ref($USER_STRUCT_FOO) eq 'CODE') { &$USER_STRUCT_FOO(); }
 
   print "};\n\n";
 }

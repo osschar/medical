@@ -4,16 +4,6 @@
 
 #include <cstdio>
 
-namespace
-{
-  const char* all_ids[] =
-  {
-    "Demo", "BNP", "CBC", "CMP", "Device", "ECG", "Hospitalization", "INR", "Lactate", "Magnesium", "Medical_hx", "TSH", "Vitals", "Echo"
-  };
-
-  const int N_ids = sizeof(all_ids) / sizeof(char*);
-}
-
 //==============================================================================
 // RtBase
 //==============================================================================
@@ -26,7 +16,7 @@ void RtSetBase::attach_or_create(bool attach)
   }
   else
   {
-    /* TBranch *seq_br = */ m_tree->Branch("SEQID", &m_seqid, "SEQID/I");
+    m_tree->Branch("SEQID", &m_seqid);
   }
 
   for (auto & f : m_rt_files)
@@ -37,22 +27,11 @@ void RtSetBase::attach_or_create(bool attach)
 
 RtSetBase::RtSetBase()
 {
-  m_rt_files.resize(N_ids);
+  // ----------------------------------------------------------------
+  // Initialize table vector m_rt_files
+  RT_SET_INIT_TABLE_VECTOR;
 
-  m_rt_files[0] = new RtFile<Demo>("Demo");
-  m_rt_files[1] = new RtFile<BNP>("BNP");
-  m_rt_files[2] = new RtFile<CBC>("CBC");
-  m_rt_files[3] = new RtFile<CMP>("CMP");
-  m_rt_files[4] = new RtFile<Device>("Device");
-  m_rt_files[5] = new RtFile<ECG>("ECG");
-  m_rt_files[6] = new RtFile<Hospitalization>("Hospitalization");
-  m_rt_files[7] = new RtFile<INR>("INR");
-  m_rt_files[8] = new RtFile<Lactate>("Lactate");
-  m_rt_files[9] = new RtFile<Magnesium>("Magnesium");
-  m_rt_files[10] = new RtFile<Medical_hx>("Medical_hx");
-  m_rt_files[11] = new RtFile<TSH>("TSH");
-  m_rt_files[12] = new RtFile<Vitals>("Vitals");
-  m_rt_files[13] = new RtFile<Echo>("Echo");
+  printf("RtSetBase::RtSetBase Initialized %d tables\n", num_files());
 }
 
 RtSetBase::~RtSetBase()
@@ -65,7 +44,8 @@ RtSetBase::~RtSetBase()
 // RtSetCreator
 //==============================================================================
 
-RtSetCreator::RtSetCreator(const char* fname)
+RtSetCreator::RtSetCreator(const char* fname) :
+  RtSetBase()
 {
   m_file = TFile::Open(fname, "RECREATE");
   m_tree = new TTree("T", "Epic all RTs Merged");
@@ -80,17 +60,17 @@ RtSetCreator::~RtSetCreator()
   
 void RtSetCreator::FillLoop()
 {
-  int sid;
+  seq_id_t sid;
 
   m_rt_files[0]->InitReadFromMainBranch();
 
-  while ((sid = m_rt_files[0]->FillMainBranch()) > -1)
+  while ((sid = m_rt_files[0]->FillMainBranch()) > seq_id_t(-1))
   {
-    printf("Processing sid %d\n", sid);
+    printf("Processing sid %lld\n", sid);
 
     m_seqid = sid;
 
-    for (int ii = 1; ii < N_ids; ++ii)
+    for (int ii = 1; ii < num_files(); ++ii)
     {
       m_rt_files[ii]->FillBranch(sid);
     }
@@ -103,7 +83,8 @@ void RtSetCreator::FillLoop()
 // RtSet
 //==============================================================================
 
-RtSet::RtSet(const char* fname)
+RtSet::RtSet(const char* fname) :
+  RtSetBase()
 {
   m_file = TFile::Open(fname, "READONLY");
   m_tree = (TTree*) m_file->Get("T");
@@ -156,6 +137,9 @@ int RtSet::GetTreeEntry(Long64_t entry, int max_range_for_index)
   return best_index_delta;
 }
 
+#ifdef DEMO_EPIC_v6
+// Example of custom search for entries to select.
+// Expects specifically names demographics variable from Epicv6, I think.
 int RtSet::GetTreeEntryDemo30Hack(Long64_t entry)
 {
   const int max_off_from_demo   = 30;
@@ -209,6 +193,26 @@ int RtSet::GetTreeEntryDemo30Hack(Long64_t entry)
   }
 
   return best_index_delta;
+}
+#endif
+
+//------------------------------------------------------------------------------
+
+// returns number of tables with no entries.
+int RtSet::select_and_apply_first_entry_for_all_files()
+{
+  int n_missing = 0;
+  for (auto & ff : m_rt_files)
+  {
+    if (ff->rt_present())
+      ff->set_selected_index(0);
+    else {
+      ff->reset_selected_index();
+      ++n_missing;
+    }
+    ff->apply_selected_index();
+  }
+  return n_missing;
 }
 
 //------------------------------------------------------------------------------
@@ -366,9 +370,9 @@ void RtSet::select_closest_entries(const IndexEventRange& reference, AccessList_
 //==============================================================================
 //==============================================================================
 
-void RtImport()
+void RtImport(const char *filename="RtSet.root")
 {
-  RtSetCreator c("Epic.root");
+  RtSetCreator c(filename);
 
   c.FillLoop();
 }
